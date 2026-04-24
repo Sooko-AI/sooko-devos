@@ -1,0 +1,95 @@
+name: sooko-devos
+version: 1.0.0
+description: >
+  Copilot generates. Sooko decides.
+  The trust layer for AI-generated software work.
+  7-stage Copilot SDK-powered agent pipeline: plan, generate,
+  review, validate, report, and fix with multi-model consensus.
+
+authors:
+  - name: Sooko AI
+    url: https://sooko.ai
+
+repository: https://github.com/sooko-ai/sooko-devos
+
+agents:
+  - name: planning-agent
+    description: >
+      Generates structured execution plans for software tasks.
+      Breaks down complex implementations into 6 reviewable steps
+      covering requirements, architecture, implementation, security,
+      testing, and rollout preparation.
+    skills:
+      - execution-planning
+      - task-decomposition
+
+  - name: codegen-agent
+    description: >
+      Generates implementation artifacts from execution plans via
+      the Copilot SDK agent runtime. Produces annotated code with
+      inline warnings for known risk areas.
+    skills:
+      - code-generation
+      - implementation-synthesis
+
+  - name: review-agent
+    description: >
+      Reviews code and implementation decisions for bugs, security
+      vulnerabilities, missing test coverage, and edge cases.
+      Operates across multiple model providers via BYOK for
+      independent multi-perspective analysis.
+    skills:
+      - code-review
+      - security-analysis
+      - test-gap-detection
+
+  - name: consensus-agent
+    description: >
+      Compares outputs across multiple model reviewers and generates
+      a confidence-backed consensus report. Produces intelligence
+      summaries like "3 models agree on 3 critical risks" and
+      identifies agreed findings, disputed findings, and recommended
+      next actions with confidence scoring.
+    skills:
+      - consensus-evaluation
+      - risk-analysis
+      - confidence-scoring
+
+  - name: fix-agent
+    description: >
+      Auto-generates patched code from consensus findings. Applies
+      fixes for all agreed issues and recalculates confidence score,
+      showing improvement delta (e.g., 72 → 89).
+    skills:
+      - fix-generation
+      - patch-synthesis
+
+skills:
+  - execution-planning
+  - code-generation
+  - code-review
+  - security-analysis
+  - test-gap-detection
+  - consensus-evaluation
+  - risk-analysis
+  - confidence-scoring
+  - fix-generation
+
+sdk:
+  name: "@github/copilot-sdk"
+  version: "^0.2.2"
+  runtime: nodejs
+
+stack:
+  frontend: Next.js 14 + Tailwind CSS
+  backend: Node.js / TypeScript
+  models:
+    - gpt-4o
+    - claude-sonnet-4
+    - gemini-2.5-pro
+
+hackathon:
+  event: Web Summit Vancouver 2026
+  challenge: GitHub Copilot SDK Hackathon
+  theme: "Build an agent into any app"
+  track: end-to-end-scenario

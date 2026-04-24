@@ -3,8 +3,9 @@ version: 1.0.0
 description: >
   Copilot generates. Sooko decides.
   The trust layer for AI-generated software work.
-  7-stage Copilot SDK-powered agent pipeline: plan, generate,
-  review, validate, report, and fix with multi-model consensus.
+  A 4-stage Copilot SDK-powered agent pipeline — plan, multi-model
+  review, consensus, and fix — that transforms a software task into a
+  confidence-scored, decision-ready report.
 
 authors:
   - name: Sooko AI
@@ -15,78 +16,97 @@ repository: https://github.com/sooko-ai/sooko-devos
 agents:
   - name: planning-agent
     description: >
-      Generates structured execution plans for software tasks.
-      Breaks down complex implementations into 6 reviewable steps
-      covering requirements, architecture, implementation, security,
-      testing, and rollout preparation.
+      Generates a structured execution plan from a software task.
+      Primary tier runs through a GitHub Copilot SDK session
+      (@github/copilot-sdk, model gpt-4.1); falls back to direct
+      OpenAI gpt-4o or a deterministic templated plan if the SDK
+      tier is unavailable. Produces 5-6 reviewable steps.
     skills:
       - execution-planning
       - task-decomposition
 
-  - name: codegen-agent
-    description: >
-      Generates implementation artifacts from execution plans via
-      the Copilot SDK agent runtime. Produces annotated code with
-      inline warnings for known risk areas.
-    skills:
-      - code-generation
-      - implementation-synthesis
-
   - name: review-agent
     description: >
-      Reviews code and implementation decisions for bugs, security
-      vulnerabilities, missing test coverage, and edge cases.
-      Operates across multiple model providers via BYOK for
-      independent multi-perspective analysis.
+      Fans out a single review prompt to three specialist model
+      reviewers in parallel, each with a differentiated system
+      prompt and bias. Outputs structured JSON (bugs, security,
+      tests, edge cases, verdict, confidence, notes) per reviewer.
+      Streams each reviewer's result to the client as it settles
+      so slow providers never block faster ones.
     skills:
       - code-review
       - security-analysis
+      - architecture-review
       - test-gap-detection
 
   - name: consensus-agent
     description: >
-      Compares outputs across multiple model reviewers and generates
-      a confidence-backed consensus report. Produces intelligence
-      summaries like "3 models agree on 3 critical risks" and
-      identifies agreed findings, disputed findings, and recommended
-      next actions with confidence scoring.
+      Cross-references the three specialist reviews and produces
+      a confidence-scored consensus report. In live mode uses an
+      LLM judge (Claude Haiku 4.5) to cluster findings semantically
+      across reviewers, catching agreement even when phrasing
+      differs. Falls back to a deterministic Jaccard-similarity
+      clusterer if the judge is unavailable. Produces agreed
+      findings, disputed findings, severity, and a recommended
+      next action.
     skills:
       - consensus-evaluation
+      - semantic-clustering
       - risk-analysis
       - confidence-scoring
 
   - name: fix-agent
     description: >
-      Auto-generates patched code from consensus findings. Applies
-      fixes for all agreed issues and recalculates confidence score,
-      showing improvement delta (e.g., 72 → 89).
+      Generates a patched version from consensus findings. Accepts
+      the full agreed/disputed finding set and the original code,
+      returns per-finding remediation steps plus an optional
+      unified patched-code block. Implemented as a direct OpenAI
+      gpt-4o call with structured output.
     skills:
       - fix-generation
       - patch-synthesis
+      - remediation-planning
 
 skills:
   - execution-planning
-  - code-generation
+  - task-decomposition
   - code-review
   - security-analysis
+  - architecture-review
   - test-gap-detection
   - consensus-evaluation
+  - semantic-clustering
   - risk-analysis
   - confidence-scoring
   - fix-generation
+  - patch-synthesis
+  - remediation-planning
 
 sdk:
   name: "@github/copilot-sdk"
   version: "^0.2.2"
   runtime: nodejs
+  nodeVersion: ">=22.5.0"
+  usage: >
+    The Copilot SDK powers the planning-agent via a real CLI
+    session (sendAndWait). It is the authoritative tier; OpenAI
+    direct is the fallback when the SDK is unavailable (e.g.,
+    Node < 22.5 or missing Copilot auth).
 
 stack:
-  frontend: Next.js 14 + Tailwind CSS
+  frontend: Next.js 14 App Router + Tailwind CSS
   backend: Node.js / TypeScript
+  streaming: Server-Sent Events (text/event-stream)
   models:
-    - gpt-4o
-    - claude-sonnet-4
-    - gemini-2.5-pro
+    planner:
+      copilot_sdk: gpt-4.1
+      fallback: gpt-4o
+    reviewers:
+      - gpt-4o                 # Security Auditor
+      - claude-sonnet-4-6      # Architecture Reviewer
+      - gemini-2.5-pro         # Quality Reviewer
+    judge: claude-haiku-4-5    # Consensus clustering
+    fix: gpt-4o
 
 hackathon:
   event: Web Summit Vancouver 2026

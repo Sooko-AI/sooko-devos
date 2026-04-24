@@ -1,12 +1,33 @@
 "use client";
 
+import { Shield, ServerCog, ShoppingCart, KeyRound } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 
-const SAMPLE_TASKS = [
-  "Build a password reset flow with email verification and rate limiting",
-  "Review an API endpoint for security, validation, and missing tests",
-  "Assess a checkout flow implementation for bugs and edge cases",
+type SampleChip = { icon: LucideIcon; label: string; prompt: string };
+
+const SAMPLE_TASKS: SampleChip[] = [
+  {
+    icon: Shield,
+    label: "Password reset",
+    prompt: "Build a password reset flow with email verification and rate limiting",
+  },
+  {
+    icon: ServerCog,
+    label: "API security audit",
+    prompt: "Review a public /users/:id API endpoint for security, authz, and missing validation",
+  },
+  {
+    icon: ShoppingCart,
+    label: "Checkout edge cases",
+    prompt: "Assess a checkout flow implementation for race conditions and concurrent-cart edge cases",
+  },
+  {
+    icon: KeyRound,
+    label: "JWT middleware",
+    prompt: "Implement JWT auth middleware with refresh-token rotation and revocation",
+  },
 ];
 
 interface HeroProps {
@@ -89,14 +110,16 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
         <p className="text-xs text-white/30 mb-3 font-medium tracking-widest">
           TRY A SAMPLE
         </p>
-        <div className="flex flex-col gap-2 items-center">
-          {SAMPLE_TASKS.map((s, i) => (
+        <div className="flex flex-wrap gap-2 justify-center">
+          {SAMPLE_TASKS.map(({ icon: Icon, label, prompt }) => (
             <button
-              key={i}
-              onClick={() => onRun(s)}
-              className="px-4 py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-white/55 text-[13px] cursor-pointer transition-all max-w-[500px] text-left leading-snug font-sans hover:bg-white/[0.05] hover:border-accent/25 hover:text-accent-muted"
+              key={label}
+              onClick={() => onRun(prompt)}
+              title={prompt}
+              className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] px-3.5 py-1.5 text-[12.5px] font-medium text-white/55 cursor-pointer transition-all hover:border-accent/30 hover:text-accent-muted hover:bg-accent/[0.05]"
             >
-              {s}
+              <Icon className="w-3.5 h-3.5" strokeWidth={2} />
+              {label}
             </button>
           ))}
         </div>

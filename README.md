@@ -12,24 +12,24 @@
 
 ## What is Sooko DevOS?
 
-Sooko DevOS is a **Copilot SDK-powered agent** that transforms AI-generated code into verified, decision-ready output.
+Sooko DevOS is a **Copilot SDK-powered agent** that transforms a software task into a confidence-scored, decision-ready report.
 
-Instead of relying on a single model's output, Sooko DevOS runs a full agentic pipeline: it plans execution, generates code, reviews across multiple AI models, builds consensus, produces a confidence-scored report, and generates a fixed version.
+Instead of trusting a single model's output, Sooko runs a four-stage pipeline: it plans execution via the Copilot SDK, fans the task out to three specialist model reviewers in parallel, clusters their findings via an LLM judge for real semantic consensus, and generates a patched fixed version from the agreed findings.
 
 ### The Problem
 
-AI can generate code quickly, but teams still spend significant time manually verifying correctness, security, and completeness. Single-model outputs are inconsistent and hard to trust.
+AI can generate code quickly, but teams still spend significant time manually verifying correctness, security, and completeness. A single-model review is inconsistent and hard to trust.
 
 ### The Solution
 
 An agentic trust layer powered by the GitHub Copilot SDK:
 
-1. **Plans** a structured execution sequence
-2. **Generates** an implementation artifact via the SDK agent runtime
-3. **Reviews** code independently across GPT-4o, Claude Sonnet 4, and Gemini 2.5 Pro
-4. **Builds consensus** — "3 models agree on 3 critical risks"
-5. **Scores confidence** — quantified trust metric (0–100) with interpretation
-6. **Generates a fixed version** — patched code from consensus findings (72 → 89)
+1. **Plans** a structured execution sequence (Copilot SDK session → `gpt-4.1`)
+2. **Reviews** the task independently across three specialist reviewers — security, architecture, quality — each with a differentiated system prompt
+3. **Builds consensus** via an LLM judge that clusters findings semantically, so "BOLA/IDOR" and "missing ownership check" count as the same issue
+4. **Generates a Fixed Version** — per-finding remediations plus an optional patched-code block
+
+Results stream to the UI over **Server-Sent Events**: plan, then each reviewer as it settles, then consensus, then done — no artificial delays.
 
 ---
 
@@ -37,87 +37,78 @@ An agentic trust layer powered by the GitHub Copilot SDK:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        User Interface                           │
-│              Next.js 14 · Tailwind CSS · TypeScript              │
+│                        Browser UI                                │
+│              Next.js 14 App Router · Tailwind · TS               │
+│         Streaming SSE reader (progressive card reveal)           │
 └──────────────────────────┬──────────────────────────────────────┘
-                           │
+                           │   POST /api/analyze   (Server-Sent Events)
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                     API Route Layer                              │
-│                    /api/analyze                                   │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                Copilot SDK Agent Runtime                         │
+│                runAgentWorkflowStream  (async generator)         │
 │                                                                  │
-│   ┌────────┐  ┌────────┐  ┌──────────┐  ┌───────────┐          │
-│   │  Plan  │→ │ Code   │→ │  Multi-  │→ │ Consensus │          │
-│   │        │  │  Gen   │  │  Model   │  │  Engine   │          │
-│   │        │  │        │  │  Review  │  │           │          │
-│   └────────┘  └────────┘  └──────────┘  └───────────┘          │
-│                                │                                 │
-│                  ┌─────────────┼─────────────┐                   │
-│                  ▼             ▼             ▼                   │
-│            ┌──────────┐ ┌──────────┐ ┌─────────────┐            │
-│            │  GPT-4o  │ │  Claude  │ │ Gemini 2.5  │            │
-│            │ Reviewer │ │ Reviewer │ │ Pro Reviewer │            │
-│            └──────────┘ └──────────┘ └─────────────┘            │
-│               (BYOK)       (BYOK)        (BYOK)                 │
+│  [1] Plan  ──►  Copilot SDK session  (gpt-4.1)                   │
+│                 └─ fallback: OpenAI gpt-4o direct                │
+│                 └─ fallback: templated plan                      │
+│                                                                  │
+│  [2] Reviewers  ──►  Promise.race  (stream as each settles)      │
+│         ├─ Security Auditor     (gpt-4o, security lens)          │
+│         ├─ Architecture Reviewer (claude-sonnet-4-6, arch lens)  │
+│         └─ Quality Reviewer     (gemini-2.5-pro, test/edge lens) │
+│                                                                  │
+│  [3] Consensus  ──►  LLM Judge (claude-haiku-4-5)                │
+│                 └─ fallback: Jaccard similarity clusterer        │
+│                                                                  │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Final Report + Fix                           │
+│          Final Report + Export PDF + Generate Fixed Version      │
 │                                                                  │
-│   Agreed Findings · Disputed Findings · Confidence Score         │
-│   Security Concerns · Test Gaps · Recommended Action             │
-│   Generate Fixed Version (72 → 89 confidence improvement)       │
+│   Agreed / Disputed findings · Severity · Confidence 0-100       │
+│   Recommended action · Printable PDF · Patched code (POST /fix)  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 7-Stage Agent Pipeline
+## 4-Stage Pipeline
 
 ```
-User Input → Copilot SDK Agent → Plan → Code Generation → Multi-Model Review → Consensus Engine → Report + Fix
+User task → Plan → Multi-Model Review → Consensus → Report + Fix
 ```
 
-| Stage | What Happens |
+| Stage | What happens |
 |-------|-------------|
-| **Intake** | User describes a software task, optionally pastes code |
-| **Plan** | Agent decomposes task into 6 structured execution steps |
-| **Code Generation** | Agent produces implementation artifact with diff view |
-| **Multi-Model Review** | GPT-4o, Claude Sonnet 4, Gemini 2.5 Pro independently review |
-| **Consensus** | Cross-reference findings: agreed, disputed, confidence scored |
-| **Report** | Final deliverable with confidence gauge and recommendations |
-| **Fix** | Auto-generated patched version from consensus findings |
+| **Intake**       | User describes a task, optionally pastes code. Four sample chips one-click populate the prompt. |
+| **Plan**         | Copilot SDK agent session emits a 5–6 step structured plan (`gpt-4.1`). Falls back through OpenAI → templated. |
+| **Review**       | Three specialists run in parallel with different system prompts. Each returns structured JSON (`bugs`, `security`, `tests`, `edgeCases`, `verdict`, `confidence`). |
+| **Consensus**    | LLM judge clusters findings across reviewers semantically. Split into agreed (≥2 reviewers) vs disputed. Confidence is the mean reviewer confidence. |
+| **Report**       | Final card with confidence gauge, findings by category, recommended action. |
+| **Fix** (opt-in) | `Generate Fixed Version` button POSTs consensus to `/api/fix`, which returns per-finding remediations + optional patched code. |
 
 ---
 
 ## Features
 
-- **Copilot SDK agentic workflow** — real agent runtime, not a wrapper
-- **Multi-model code review** — GPT-4o, Claude Sonnet 4, Gemini 2.5 Pro via BYOK
-- **Consensus intelligence** — "3 models agree on 3 critical risks"
-- **Confidence scoring** — radial gauge with interpretation (Safe to ship / Proceed with caution / High risk)
-- **Code diff panel** — generated implementation with line-level annotations
-- **Generate Fixed Version** — auto-patched code with confidence improvement (72 → 89)
-- **Final implementation report** — exportable, audit-friendly summary
-- **Stage completion feedback** — visual progress through the 7-stage pipeline
+- **Copilot SDK-powered planning** — a real `CopilotClient` session with `sendAndWait`, not a wrapper.
+- **Three specialist reviewers** — security, architecture, quality — each with a distinct system prompt and emphasis.
+- **LLM-judge consensus** — Claude Haiku clusters findings semantically; Jaccard fallback when judge unavailable.
+- **Real SSE streaming** — plan arrives in ~5–10 s, reviewers stream in one at a time as each provider settles, consensus follows, then done.
+- **Structured output everywhere** — `zodResponseFormat` (OpenAI), `zodOutputFormat` (Anthropic), `responseJsonSchema` (Google) — no prose-parsing.
+- **Export PDF** — `window.print()` + tuned `@media print` stylesheet hides chrome and inverts colors for clean prints.
+- **Generate Fixed Version** — separate `/api/fix` endpoint, OpenAI structured output, renders per-finding remediations + optional patched code inline.
+- **Graceful degradation** — any provider failure produces a degraded `ModelReview` (verdict: "Fail", notes: "Provider unavailable"); the UI still renders, the stream still completes.
 
 ---
 
 ## Demo Flow
 
-1. Enter a software task (e.g., "Build a password reset flow with rate limiting")
-2. Watch the 7-stage pipeline execute with stage completion flashes
-3. Review the generated code diff with SDK-annotated warnings
-4. Explore three independent model review cards (click to expand)
-5. See the consensus intelligence summary: "3 models agree on 3 critical risks"
-6. View the final report with animated confidence gauge
-7. Click "Generate Fixed Version" to see the auto-patched output with confidence improvement
+1. Click one of the four sample chips under the prompt (e.g. **API security audit**).
+2. Plan card streams in first — five task-specific steps.
+3. Three specialist review cards pop in one at a time as their providers settle (race order varies run-to-run).
+4. Consensus panel appears, showing agreed and disputed findings clustered by the LLM judge.
+5. Final report renders with confidence gauge, security concerns, test gaps, and recommended action derived from the real findings.
+6. Click **Export PDF** to save a clean deliverable, or **Generate Fixed Version** to get structured remediations from the consensus set.
 
 ---
 
@@ -125,26 +116,28 @@ User Input → Copilot SDK Agent → Plan → Code Generation → Multi-Model Re
 
 ### Prerequisites
 
-- Node.js 18+ and npm
-- (Optional) GitHub Copilot subscription or BYOK API keys
+- **Node.js 22.5+** — required by the `@github/copilot` CLI bundled with `@github/copilot-sdk` (it imports `node:sqlite`, added in Node 22.5). A `.nvmrc` is included, so `nvm use` picks the correct version.
+- **pnpm** — used by this repo (`pnpm-lock.yaml` is committed).
+- For **live mode**: GitHub Copilot authenticated locally *plus* three BYOK API keys (OpenAI, Anthropic, Google AI).
 
 ### Installation
 
 ```bash
 git clone https://github.com/sooko-ai/sooko-devos.git
 cd sooko-devos
-npm install
+nvm use          # picks up Node 22 from .nvmrc
+pnpm install
 ```
 
 ### Configuration
 
-Create a `.env.local` file (optional — the app runs in mock mode by default):
+Copy `.env.example` to `.env.local` and fill in values:
 
 ```env
-# Set to "live" to use real Copilot SDK agent
+# "mock" (default, no keys needed) or "live" (real Copilot SDK + multi-model review)
 COPILOT_SDK_MODE=mock
 
-# BYOK keys for multi-model review (optional)
+# Required for live mode
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_AI_API_KEY=...
@@ -153,12 +146,13 @@ GOOGLE_AI_API_KEY=...
 ### Run
 
 ```bash
-npm run dev
+nvm use          # only needed once per shell session
+pnpm dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
-The app runs fully in **mock mode** by default — no API keys required for the demo. Set `COPILOT_SDK_MODE=live` with BYOK keys to activate real model review.
+The app runs fully in **mock mode** by default — no API keys required. Set `COPILOT_SDK_MODE=live` with all three BYOK keys to activate the real pipeline. On Node < 22.5 the Copilot SDK tier fails with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite` and the planner falls back to OpenAI direct — reviewers and the judge still run live.
 
 ---
 
@@ -168,47 +162,42 @@ The app runs fully in **mock mode** by default — no API keys required for the 
 sooko-devos/
 ├── app/
 │   ├── layout.tsx              # Root layout with fonts
-│   ├── page.tsx                # Main orchestration page
-│   ├── globals.css             # Global styles
+│   ├── page.tsx                # Main page — SSE reader, stage state machine
+│   ├── globals.css             # Global styles + @media print rules
 │   └── api/
-│       └── analyze/
-│           └── route.ts        # Analysis API endpoint
+│       ├── analyze/
+│       │   └── route.ts        # SSE endpoint — streams the pipeline
+│       └── fix/
+│           └── route.ts        # Generate Fixed Version endpoint
 ├── components/
-│   ├── Navbar.tsx              # Navigation bar
-│   ├── Hero.tsx                # Landing hero + task input
-│   ├── Timeline.tsx            # 7-stage progress indicator
+│   ├── Navbar.tsx              # Top bar with reset
+│   ├── Hero.tsx                # Landing hero + task input + sample chips
+│   ├── Timeline.tsx            # Stage progress indicator
 │   ├── PlanView.tsx            # Execution plan display
-│   ├── CodeDiffPanel.tsx       # Generated code diff view
-│   ├── ReviewCards.tsx         # Model review cards (expandable)
-│   ├── ConsensusPanel.tsx      # Consensus analysis + intelligence summary
-│   ├── FinalReport.tsx         # Final report + confidence gauge
-│   ├── FixPanel.tsx            # Generate Fixed Version modal
-│   ├── LoadingState.tsx        # Loading + stage completion
+│   ├── ReviewCards.tsx         # Per-reviewer cards (progressive reveal)
+│   ├── ConsensusPanel.tsx      # Agreed + disputed findings + confidence bar
+│   ├── FinalReport.tsx         # Final card, PDF + fix buttons, fix panel
+│   ├── LoadingState.tsx        # Loading indicator per stage
 │   └── ui/
-│       ├── Badge.tsx           # Badge/chip component
-│       └── Card.tsx            # Card container component
+│       ├── Badge.tsx           # Badge / severity badge
+│       └── Card.tsx            # Card container
 ├── lib/
-│   ├── agent.ts                # Copilot SDK agent integration
-│   ├── plan.ts                 # Plan generation engine
-│   ├── codegen.ts              # Code generation engine
-│   ├── reviewers.ts            # Multi-model review engine
-│   ├── consensus.ts            # Consensus scoring engine
-│   ├── fixes.ts                # Fix generation engine
-│   └── utils.ts                # Utility functions
+│   ├── agent.ts                # Async-generator orchestrator + plan tiers
+│   ├── reviewers.ts            # Specialist prompts + streaming fan-out
+│   ├── consensus.ts            # LLM judge + Jaccard clustering
+│   ├── plan.ts                 # Templated plan (final fallback)
+│   ├── schemas.ts              # Shared zod schemas (review, plan, fix)
+│   └── utils.ts                # cn, formatDate, delay
 ├── types/
 │   └── index.ts                # TypeScript type definitions
-├── presentations/
-│   └── SookoDevOS.pptx         # 2-slide pitch deck
-├── feedback/
-│   └── sooko-devos-feedback.md # Hackathon feedback PR file
 ├── AGENTS.md                   # Agent specification
 ├── apm.yml                     # APM manifest
-├── package.json
+├── .env.example
+├── .nvmrc                      # Pins Node 22
+├── package.json                # "engines": { "node": ">=22.5.0" }
 ├── tailwind.config.ts
 ├── tsconfig.json
-├── next.config.js
-├── .env.example
-└── .gitignore
+└── next.config.js
 ```
 
 ---
@@ -218,25 +207,29 @@ sooko-devos/
 | Layer | Technology |
 |-------|-----------|
 | Framework | Next.js 14 (App Router) |
-| Language | TypeScript |
-| Styling | Tailwind CSS |
-| Agent Runtime | GitHub Copilot SDK (`@github/copilot-sdk`) |
-| Models | GPT-4o · Claude Sonnet 4 · Gemini 2.5 Pro |
-| Icons | Lucide React |
+| Language | TypeScript (target: ES2020) |
+| Styling | Tailwind CSS + print stylesheet |
+| Streaming | Server-Sent Events (`text/event-stream`) |
+| Agent runtime | GitHub Copilot SDK (`@github/copilot-sdk@^0.2.2`) |
+| Planner model | `gpt-4.1` via Copilot SDK · `gpt-4o` direct fallback |
+| Reviewer models | `gpt-4o` · `claude-sonnet-4-6` · `gemini-2.5-pro` |
+| Judge model | `claude-haiku-4-5` (consensus clustering) |
+| Fix model | `gpt-4o` (structured output via `zodResponseFormat`) |
+| Icons | `lucide-react` |
 
 ---
 
 ## Copilot SDK Integration
 
-The Copilot SDK powers the agentic workflow in `lib/agent.ts`:
+The Copilot SDK is the authoritative planner. See `lib/agent.ts:generatePlanViaSDK`:
 
-- **Agent initialization** — creates a Copilot SDK client with BYOK provider configuration
-- **Agent instructions** — defines the Sooko DevOS agent persona and structured output format
-- **Tool definitions** — registers `generate_plan`, `generate_code`, `review_code`, and `build_consensus` as agent tools
-- **Workflow orchestration** — runs the full 7-stage pipeline through the SDK runtime
-- **BYOK support** — routes reviews to different model providers via Bring Your Own Key
+- `new CopilotClient()` spawns the bundled `@github/copilot` CLI via JSON-RPC.
+- `client.createSession({ model: "gpt-4.1", onPermissionRequest: approveAll, systemMessage: { mode: "replace", content: AGENT_INSTRUCTIONS } })` opens a session.
+- `session.sendAndWait({ prompt }, 45_000)` blocks on `session.idle` and returns the assistant message.
+- The response is parsed via `PlanSchema` (zod) and returned as a typed `ExecutionPlan`.
+- `session.disconnect()` and `client.stop()` run in a `finally` so no orphan CLI processes linger.
 
-See [AGENTS.md](./AGENTS.md) for the full agent specification.
+If the SDK tier fails (missing Copilot auth, wrong Node version, model unavailable), the planner transparently falls through to direct OpenAI, and then to a templated plan. See [AGENTS.md](./AGENTS.md) for the full agent specification.
 
 ---
 
@@ -252,10 +245,10 @@ See [AGENTS.md](./AGENTS.md) for the full agent specification.
 - [x] README with architecture diagram and setup instructions
 - [x] AGENTS.md with agent specification
 - [x] apm.yml manifest
-- [x] 2-slide deck (see `/presentations/`)
-- [x] 150-word submission summary
 - [x] Feedback PR file (see `/feedback/`)
+- [ ] 2-slide pitch deck
 - [ ] 3-minute demo video
+- [ ] 150-word submission summary
 
 ---
 

@@ -1,9 +1,12 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { AnalysisResult } from "@/types";
+import type { FixOutput } from "@/lib/schemas";
 import { Card } from "@/components/ui/Card";
 import { SeverityBadge } from "@/components/ui/Badge";
 import { formatDate } from "@/lib/utils";
+import { listHistory, updateHistoryFix } from "@/lib/history";
 
 function ReportSection({
   title,
@@ -24,12 +27,61 @@ function ReportSection({
 
 export function FinalReport({ result }: { result: AnalysisResult }) {
   const { task, plan, consensus } = result;
+  const [fixLoading, setFixLoading] = useState(false);
+  const [fixError, setFixError] = useState<string | null>(null);
+  const [fix, setFix] = useState<FixOutput | null>(null);
+
+  // Restore a previously-generated fix when this report is loaded from history.
+  useEffect(() => {
+    const entry = listHistory().find((e) => e.id === task.id);
+    if (entry?.fix) setFix(entry.fix);
+  }, [task.id]);
+
   const confColor =
     consensus.confidence >= 80
       ? "#34d399"
       : consensus.confidence >= 65
       ? "#fbbf24"
       : "#f87171";
+
+  const securityAgreed = consensus.agreed.filter((f) => f.category === "Security");
+  const securityDisputed = consensus.disputed.filter((f) => f.category === "Security");
+  const testAgreed = consensus.agreed.filter((f) => f.category === "Testing");
+  const testDisputed = consensus.disputed.filter((f) => f.category === "Testing");
+  const highSevSecurity = securityAgreed.filter((f) => f.severity === "high").length;
+
+  async function handleGenerateFix() {
+    setFixLoading(true);
+    setFixError(null);
+    try {
+      const response = await fetch("/api/fix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task: task.prompt,
+          codeSnippet: task.codeSnippet,
+          agreed: consensus.agreed,
+          disputed: consensus.disputed,
+        }),
+      });
+      const data = await response.json();
+      if (!data.success || !data.data) {
+        throw new Error(data.error || "Fix generation failed");
+      }
+      const fixOutput = data.data as FixOutput;
+      setFix(fixOutput);
+      updateHistoryFix(task.id, fixOutput);
+    } catch (err) {
+      console.error("Fix generation failed:", err);
+      setFixError(err instanceof Error ? err.message : "Fix generation failed");
+    } finally {
+      setFixLoading(false);
+    }
+  }
+
+  function handleExportPdf() {
+    window.print();
+  }
 
   return (
     <div className="animate-fade-in">
@@ -42,7 +94,7 @@ export function FinalReport({ result }: { result: AnalysisResult }) {
         </p>
       </div>
 
-      <Card className="!p-0 overflow-hidden !border-accent/[0.12]">
+      <Card className="!p-0 overflow-hidden !border-accent/[0.12] print-report">
         {/* Report Header */}
         <div className="px-8 py-7 border-b border-white/[0.05] bg-accent/[0.03]">
           <div className="flex justify-between items-start">
@@ -134,21 +186,99 @@ export function FinalReport({ result }: { result: AnalysisResult }) {
           </ReportSection>
 
           <ReportSection title="Security Concerns">
-            <p className="text-[13px] text-white/55 leading-relaxed">
-              {consensus.securityCount} security-related findings identified
-              across all reviewers. Key concerns include insufficient rate
-              limiting, missing security headers, and token lifecycle
-              vulnerabilities. All high-severity security findings have
-              multi-reviewer consensus.
-            </p>
+            {consensus.securityCount === 0 ? (
+              <p className="text-[13px] text-white/55 leading-relaxed">
+                No security findings were surfaced by any reviewer.
+              </p>
+            ) : (
+              <>
+                <p className="text-[13px] text-white/55 leading-relaxed mb-3">
+                  {consensus.securityCount} security-related finding
+                  {consensus.securityCount === 1 ? "" : "s"} identified across
+                  all reviewers.{" "}
+                  {securityAgreed.length > 0
+                    ? `${securityAgreed.length} reached multi-reviewer consensus`
+                    : "None reached multi-reviewer consensus"}
+                  {highSevSecurity > 0
+                    ? `, of which ${highSevSecurity} ${
+                        highSevSecurity === 1 ? "is" : "are"
+                      } high-severity`
+                    : ""}
+                  .
+                </p>
+                {securityAgreed.map((f, i) => (
+                  <div key={`sa-${i}`} className="flex gap-2.5 mb-1.5 items-start">
+                    <SeverityBadge severity={f.severity} />
+                    <div>
+                      <span className="text-[13px] text-text-primary">
+                        {f.finding}
+                      </span>
+                      <span className="text-[11px] text-white/25 ml-2">
+                        (agreed · {f.reviewers.join(", ")})
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                {securityDisputed.map((f, i) => (
+                  <div key={`sd-${i}`} className="flex gap-2.5 mb-1.5 items-start">
+                    <SeverityBadge severity={f.severity} />
+                    <div>
+                      <span className="text-[13px] text-white/55">
+                        {f.finding}
+                      </span>
+                      <span className="text-[11px] text-white/25 ml-2">
+                        ({f.reviewer} only)
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
           </ReportSection>
 
           <ReportSection title="Missing Test Coverage">
-            <p className="text-[13px] text-white/55 leading-relaxed">
-              {consensus.testGapCount} test gaps identified. Critical failure
-              paths, concurrency scenarios, and boundary conditions lack
-              coverage. No load or stress testing present.
-            </p>
+            {consensus.testGapCount === 0 ? (
+              <p className="text-[13px] text-white/55 leading-relaxed">
+                No test-coverage gaps were surfaced by any reviewer.
+              </p>
+            ) : (
+              <>
+                <p className="text-[13px] text-white/55 leading-relaxed mb-3">
+                  {consensus.testGapCount} test gap
+                  {consensus.testGapCount === 1 ? "" : "s"} identified across
+                  all reviewers.{" "}
+                  {testAgreed.length > 0
+                    ? `${testAgreed.length} reached multi-reviewer consensus.`
+                    : "None reached multi-reviewer consensus."}
+                </p>
+                {testAgreed.map((f, i) => (
+                  <div key={`ta-${i}`} className="flex gap-2.5 mb-1.5 items-start">
+                    <SeverityBadge severity={f.severity} />
+                    <div>
+                      <span className="text-[13px] text-text-primary">
+                        {f.finding}
+                      </span>
+                      <span className="text-[11px] text-white/25 ml-2">
+                        (agreed · {f.reviewers.join(", ")})
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                {testDisputed.map((f, i) => (
+                  <div key={`td-${i}`} className="flex gap-2.5 mb-1.5 items-start">
+                    <SeverityBadge severity={f.severity} />
+                    <div>
+                      <span className="text-[13px] text-white/55">
+                        {f.finding}
+                      </span>
+                      <span className="text-[11px] text-white/25 ml-2">
+                        ({f.reviewer} only)
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
           </ReportSection>
 
           {/* Recommendation Box */}
@@ -166,20 +296,85 @@ export function FinalReport({ result }: { result: AnalysisResult }) {
         </div>
 
         {/* Report Footer */}
-        <div className="px-8 py-4 border-t border-white/[0.05] flex justify-between items-center">
+        <div className="px-8 py-4 border-t border-white/[0.05] flex justify-between items-center print-hide">
           <p className="text-[11px] text-white/20">
             Sooko DevOS · Trust Verification Engine · v0.1.0
           </p>
           <div className="flex gap-2">
-            <button className="px-4 py-2 rounded-lg border border-white/[0.08] bg-transparent text-white/50 text-xs font-medium cursor-pointer hover:border-white/20 transition-all">
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              className="px-4 py-2 rounded-lg border border-white/[0.08] bg-transparent text-white/50 text-xs font-medium cursor-pointer hover:border-white/20 transition-all"
+            >
               Export PDF
             </button>
-            <button className="px-4 py-2 rounded-lg border-none bg-gradient-to-br from-accent to-purple-600 text-white text-xs font-semibold cursor-pointer hover:opacity-90 transition-all">
-              Generate Fixed Version
+            <button
+              type="button"
+              onClick={handleGenerateFix}
+              disabled={fixLoading}
+              className="px-4 py-2 rounded-lg border-none bg-gradient-to-br from-accent to-purple-600 text-white text-xs font-semibold cursor-pointer hover:opacity-90 transition-all disabled:opacity-60 disabled:cursor-wait"
+            >
+              {fixLoading ? "Generating…" : fix ? "Regenerate Fixed Version" : "Generate Fixed Version"}
             </button>
           </div>
         </div>
       </Card>
+
+      {/* Fix panel */}
+      {fixError && (
+        <div className="mt-5 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 print-hide">
+          <span className="font-semibold">Fix generation failed:</span> {fixError}
+        </div>
+      )}
+
+      {fix && (
+        <div className="mt-6 animate-fade-in print-report">
+          <div className="mb-5">
+            <h2 className="text-lg font-bold text-text-primary tracking-tight">
+              Fixed Version
+            </h2>
+            <p className="text-[13px] text-white/40 mt-1">
+              Remediations generated from agreed and disputed findings
+            </p>
+          </div>
+          <Card className="!border-accent/[0.12]">
+            <ReportSection title="Summary">
+              <p className="text-sm text-white/65 leading-relaxed">{fix.summary}</p>
+            </ReportSection>
+
+            <ReportSection title={`Fixes (${fix.fixes.length})`}>
+              <div className="space-y-4">
+                {fix.fixes.map((f, i) => (
+                  <div key={i} className="pl-3 border-l-2 border-accent/30">
+                    <div className="flex gap-2 items-start mb-1.5">
+                      <SeverityBadge severity={f.severity} />
+                      <span className="text-[13px] font-semibold text-text-primary">
+                        {f.finding}
+                      </span>
+                    </div>
+                    <p className="text-[13px] text-white/65 mb-2 leading-relaxed">
+                      {f.remediation}
+                    </p>
+                    {f.codeChange?.trim() && (
+                      <pre className="text-[12px] bg-black/40 border border-white/[0.06] rounded-md p-3 overflow-x-auto text-white/80 font-mono whitespace-pre-wrap">
+                        {f.codeChange}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </ReportSection>
+
+            {fix.patchedCode?.trim() && (
+              <ReportSection title="Patched Code">
+                <pre className="text-[12px] bg-black/40 border border-white/[0.06] rounded-md p-3 overflow-x-auto text-white/80 font-mono whitespace-pre-wrap">
+                  {fix.patchedCode}
+                </pre>
+              </ReportSection>
+            )}
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

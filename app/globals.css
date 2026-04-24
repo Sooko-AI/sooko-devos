@@ -82,3 +82,46 @@ textarea:focus,
 input:focus {
   outline: none;
 }
+
+/* ─── Print styles (Export PDF via window.print) ─────────────────────────── */
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111111 !important;
+  }
+
+  /* Hide chrome that shouldn't appear in exported PDF */
+  nav,
+  [data-print-hide],
+  .print-hide {
+    display: none !important;
+  }
+
+  /* Force report surfaces to print in ink-friendly colors */
+  .print-report,
+  .print-report * {
+    background: transparent !important;
+    color: #111111 !important;
+    border-color: #d4d4d8 !important;
+    box-shadow: none !important;
+    animation: none !important;
+  }
+
+  .print-report pre {
+    background: #f4f4f5 !important;
+    border: 1px solid #d4d4d8 !important;
+    color: #18181b !important;
+  }
+
+  /* Let report cards flow across pages without clipping */
+  .print-report {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+}

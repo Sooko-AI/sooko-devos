@@ -1,110 +1,168 @@
 /**
- * Sooko DevOS — Copilot SDK Agent Integration
+ * Sooko DevOS — Agent workflow orchestrator.
  *
- * This module integrates the GitHub Copilot SDK to power the agentic workflow.
- * The agent uses the SDK's runtime for plan generation, code review orchestration,
- * and report synthesis.
+ * In live mode (COPILOT_SDK_MODE=live):
+ *   - Plan step  : Copilot SDK agent session produces a model-generated ExecutionPlan.
+ *   - Reviews    : Direct provider SDKs (OpenAI / Anthropic / Google) fan out in parallel.
+ *   - Consensus  : Deterministic overlap of the real review outputs.
  *
- * Architecture:
- *   User Request → Copilot SDK Agent → Plan → Multi-Model Review → Consensus → Report
+ * In mock mode: templated plan + hardcoded reviewer strings + deterministic consensus.
  *
- * The SDK communicates with the Copilot CLI via JSON-RPC. When BYOK keys are
- * configured, the agent can route to specific model providers (OpenAI, Anthropic,
- * Google) for the multi-model review step.
- *
- * Environment variables:
- *   COPILOT_SDK_MODE       – "live" | "mock" (defaults to "mock" for hackathon demo)
- *   OPENAI_API_KEY         – For GPT reviewer (BYOK)
- *   ANTHROPIC_API_KEY      – For Claude reviewer (BYOK)
- *   GOOGLE_AI_API_KEY      – For Gemini reviewer (BYOK)
+ * Live mode requires:
+ *   - GitHub Copilot CLI installed and authenticated (used by @github/copilot-sdk).
+ *   - OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_AI_API_KEY in .env.local.
  */
 
-import type { ExecutionPlan, ModelReview, ConsensusReport, AnalysisResult, Task } from "@/types";
+import OpenAI from "openai";
+import { zodResponseFormat } from "openai/helpers/zod";
+import type {
+  ExecutionPlan,
+  AnalysisResult,
+  Task,
+  ModelReview,
+  ConsensusReport,
+} from "@/types";
 import { generatePlan } from "./plan";
-import { runMultiModelReview } from "./reviewers";
+import { runMultiModelReviewStream } from "./reviewers";
 import { buildConsensus } from "./consensus";
+import { PlanSchema } from "./schemas";
 
-// ─── SDK Client Setup ────────────────────────────────────────────────────────
+export type AnalyzeEvent =
+  | { type: "plan"; task: Task; plan: ExecutionPlan }
+  | { type: "review"; review: ModelReview }
+  | { type: "consensus"; consensus: ConsensusReport }
+  | { type: "done"; result: AnalysisResult }
+  | { type: "error"; error: string };
 
-let sdkClient: any = null;
+const AGENT_INSTRUCTIONS = `You are the Sooko DevOS planning agent.
+Your job: produce a concise, actionable execution plan for a software task.
 
-/**
- * Initialize the Copilot SDK client.
- * In live mode, this creates a real SDK session.
- * In mock mode (default for hackathon), uses deterministic logic.
- */
-async function initSdkClient() {
-  const mode = process.env.COPILOT_SDK_MODE || "mock";
+Return ONLY JSON (no markdown fences, no prose) matching this shape:
+{
+  "objective": "<one-sentence restatement of the task>",
+  "steps": [
+    { "id": 1, "title": "<short imperative>", "description": "<1-2 sentences of specific action>", "status": "complete" | "in-progress" | "pending" }
+  ]
+}
 
-  if (mode === "live") {
+Rules:
+- Produce exactly 5 or 6 steps.
+- Each step must be concrete and testable — no generic filler.
+- Mark all but the final step as "complete"; mark the final step as "pending".
+  (The plan is shown to a human as a post-hoc summary of completed work plus the remaining rollout step.)
+- Do not include any text outside the JSON object.`;
+
+const PLAN_TIMEOUT_MS = 45_000;
+// The Copilot CLI exposes a curated model list (`auto`, `gpt-4.1`, `gpt-5-mini`,
+// `claude-haiku-4.5`). We use gpt-4.1 for the plan step; the OpenAI fallback
+// uses gpt-4o independently.
+const COPILOT_PLAN_MODEL = "gpt-4.1";
+const OPENAI_PLAN_MODEL = "gpt-4o";
+
+function buildPlanPrompt(task: string, code?: string, repo?: string): string {
+  let p = `Task: ${task}`;
+  if (code) p += `\n\nCode context:\n\`\`\`\n${code}\n\`\`\``;
+  if (repo) p += `\n\nRepository context: ${repo}`;
+  return p;
+}
+
+function stripFences(raw: string): string {
+  return raw.replace(/```(?:json)?\s*|\s*```/g, "").trim();
+}
+
+async function generatePlanViaSDK(
+  task: string,
+  code?: string,
+  repo?: string
+): Promise<ExecutionPlan> {
+  const { CopilotClient, approveAll } = await import("@github/copilot-sdk");
+  const client = new CopilotClient();
+  try {
+    const session = await client.createSession({
+      model: COPILOT_PLAN_MODEL,
+      onPermissionRequest: approveAll,
+      systemMessage: { mode: "replace", content: AGENT_INSTRUCTIONS },
+    });
     try {
-      const { CopilotClient } = await import("@github/copilot-sdk");
-      sdkClient = new CopilotClient({
-        // BYOK configuration for multi-model access
-        providers: {
-          openai: process.env.OPENAI_API_KEY
-            ? { apiKey: process.env.OPENAI_API_KEY }
-            : undefined,
-          anthropic: process.env.ANTHROPIC_API_KEY
-            ? { apiKey: process.env.ANTHROPIC_API_KEY }
-            : undefined,
-        },
-      });
-      console.log("[Sooko Agent] Copilot SDK client initialized in LIVE mode");
-    } catch (err) {
-      console.warn("[Sooko Agent] SDK init failed, falling back to mock mode:", err);
-      sdkClient = null;
+      const event = await session.sendAndWait(
+        { prompt: buildPlanPrompt(task, code, repo) },
+        PLAN_TIMEOUT_MS
+      );
+      const content = event?.data?.content;
+      if (!content) throw new Error("Empty plan response from Copilot SDK");
+      const parsed = PlanSchema.parse(JSON.parse(stripFences(content)));
+      return parsed;
+    } finally {
+      await session.disconnect().catch(() => {});
     }
-  } else {
-    console.log("[Sooko Agent] Running in MOCK mode (set COPILOT_SDK_MODE=live for SDK)");
+  } finally {
+    await client.stop().catch(() => {});
   }
 }
 
-// ─── Agent Workflow ──────────────────────────────────────────────────────────
+async function generatePlanViaOpenAI(
+  task: string,
+  code?: string,
+  repo?: string
+): Promise<ExecutionPlan> {
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const messages = [
+    { role: "system" as const, content: AGENT_INSTRUCTIONS },
+    { role: "user" as const, content: buildPlanPrompt(task, code, repo) },
+  ];
+  const completion = await client.chat.completions.parse({
+    model: OPENAI_PLAN_MODEL,
+    messages,
+    response_format: zodResponseFormat(PlanSchema, "ExecutionPlan"),
+  });
+  const parsed = completion.choices[0]?.message?.parsed;
+  if (!parsed) throw new Error("OpenAI plan response missing parsed output");
+  return parsed;
+}
+
+async function generatePlanLive(
+  task: string,
+  code?: string,
+  repo?: string
+): Promise<ExecutionPlan> {
+  // Tier 1: Copilot SDK (authoritative; requires Node 22+ for the bundled CLI).
+  try {
+    const plan = await generatePlanViaSDK(task, code, repo);
+    console.log("[Sooko Agent] Plan generated via Copilot SDK");
+    return plan;
+  } catch (err) {
+    console.warn(
+      "[Sooko Agent] Copilot SDK plan failed, falling back to OpenAI:",
+      err instanceof Error ? err.message : err
+    );
+  }
+  // Tier 2: OpenAI direct (always available when OPENAI_API_KEY is set).
+  try {
+    const plan = await generatePlanViaOpenAI(task, code, repo);
+    console.log("[Sooko Agent] Plan generated via OpenAI");
+    return plan;
+  } catch (err) {
+    console.warn(
+      "[Sooko Agent] OpenAI plan failed, falling back to templated plan:",
+      err instanceof Error ? err.message : err
+    );
+  }
+  // Tier 3: Templated.
+  return generatePlan(task);
+}
 
 /**
- * The core agent instructions that define the Sooko DevOS agent persona.
- * These are passed to the Copilot SDK as the agent system prompt.
+ * Streams the full analysis: plan → per-reviewer results as each settles →
+ * consensus → done. Yields one event per milestone; consumers (the SSE route)
+ * can forward each event to the client immediately.
  */
-const AGENT_INSTRUCTIONS = `You are the Sooko DevOS agent.
-Your purpose is to transform AI-generated software work into decision-ready, trustworthy output.
-
-## Core Workflow
-1. Understand the task and restate it clearly.
-2. Produce a concise execution plan with 5-6 actionable steps.
-3. Evaluate generated code or implementation for quality.
-4. Identify: Bugs, Security issues, Missing tests, Edge cases.
-5. Compare findings across multiple reviewers.
-6. Produce a final recommendation with a confidence score (0-100).
-
-## Output Format
-Return structured JSON with: taskSummary, executionPlan, findings, consensus, risks, recommendedAction, confidenceScore.
-
-## Principles
-- Be precise, not verbose
-- Prioritize correctness over creativity
-- Highlight uncertainty clearly
-- Never assume correctness from a single source`;
-
-/**
- * Run the full Sooko DevOS agent workflow.
- *
- * When the Copilot SDK is available (live mode), this uses the SDK to:
- * 1. Generate an execution plan via the agent runtime
- * 2. Orchestrate multi-model review using BYOK providers
- * 3. Build consensus across reviewer outputs
- *
- * In mock mode, uses deterministic local engines.
- */
-export async function runAgentWorkflow(
+export async function* runAgentWorkflowStream(
   taskPrompt: string,
   codeSnippet?: string,
   repoContext?: string
-): Promise<AnalysisResult> {
-  // Initialize SDK on first call
-  if (sdkClient === undefined) {
-    await initSdkClient();
-  }
+): AsyncGenerator<AnalyzeEvent, void, void> {
+  const mode = process.env.COPILOT_SDK_MODE || "mock";
+  const isLive = mode === "live";
 
   const task: Task = {
     id: crypto.randomUUID(),
@@ -115,96 +173,26 @@ export async function runAgentWorkflow(
     createdAt: new Date().toISOString(),
   };
 
-  let plan: ExecutionPlan;
-  let reviews: ModelReview[];
-  let consensus: ConsensusReport;
+  const plan: ExecutionPlan = isLive
+    ? await generatePlanLive(taskPrompt, codeSnippet, repoContext)
+    : generatePlan(taskPrompt);
+  yield { type: "plan", task, plan };
 
-  if (sdkClient) {
-    // ── Live SDK Mode ──
-    // Use Copilot SDK agent to generate plan
-    const agentResponse = await sdkClient.run({
-      instructions: AGENT_INSTRUCTIONS,
-      messages: [
-        {
-          role: "user",
-          content: buildAgentPrompt(taskPrompt, codeSnippet, repoContext),
-        },
-      ],
-      tools: [
-        {
-          name: "generate_plan",
-          description: "Generate a structured execution plan for a software task",
-          parameters: {
-            type: "object",
-            properties: {
-              task: { type: "string", description: "The software task to plan" },
-            },
-          },
-        },
-        {
-          name: "review_code",
-          description: "Review code for bugs, security issues, and quality",
-          parameters: {
-            type: "object",
-            properties: {
-              code: { type: "string", description: "Code to review" },
-              context: { type: "string", description: "Task context" },
-            },
-          },
-        },
-      ],
-    });
-
-    // Parse structured output from agent
-    const result = parseAgentResponse(agentResponse);
-    plan = result.plan || generatePlan(taskPrompt);
-    reviews = result.reviews || runMultiModelReview(taskPrompt, codeSnippet);
-    consensus = result.consensus || buildConsensus(reviews);
-  } else {
-    // ── Mock Mode (Hackathon Demo) ──
-    plan = generatePlan(taskPrompt);
-    reviews = runMultiModelReview(taskPrompt, codeSnippet);
-    consensus = buildConsensus(reviews);
+  const reviews: ModelReview[] = [];
+  for await (const review of runMultiModelReviewStream(
+    taskPrompt,
+    codeSnippet,
+    repoContext
+  )) {
+    reviews.push(review);
+    yield { type: "review", review };
   }
+
+  const consensus = await buildConsensus(reviews);
+  yield { type: "consensus", consensus };
 
   task.status = "report";
-
-  return { task, plan, reviews, consensus };
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function buildAgentPrompt(
-  task: string,
-  code?: string,
-  repo?: string
-): string {
-  let prompt = `Analyze this software task and provide a structured review:\n\nTask: ${task}`;
-  if (code) prompt += `\n\nCode to review:\n\`\`\`\n${code}\n\`\`\``;
-  if (repo) prompt += `\n\nRepository context: ${repo}`;
-  prompt += `\n\nProvide your response as structured JSON with: executionPlan, bugs, securityIssues, missingTests, edgeCases, confidenceScore, and recommendedAction.`;
-  return prompt;
-}
-
-function parseAgentResponse(response: any): {
-  plan?: ExecutionPlan;
-  reviews?: ModelReview[];
-  consensus?: ConsensusReport;
-} {
-  try {
-    if (response?.content) {
-      const textBlock = response.content.find((b: any) => b.type === "text");
-      if (textBlock?.text) {
-        const json = JSON.parse(
-          textBlock.text.replace(/```json|```/g, "").trim()
-        );
-        return json;
-      }
-    }
-  } catch {
-    // Fall back to mock engines
-  }
-  return {};
+  yield { type: "done", result: { task, plan, reviews, consensus } };
 }
 
 export { AGENT_INSTRUCTIONS };

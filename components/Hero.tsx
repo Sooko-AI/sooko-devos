@@ -30,6 +30,22 @@ const SAMPLE_TASKS: SampleChip[] = [
   },
 ];
 
+const PIPELINE_STAGES = [
+  { step: "01", label: "Plan" },
+  { step: "02", label: "Generate" },
+  { step: "03", label: "Review" },
+  { step: "04", label: "Consensus" },
+  { step: "05", label: "Validate" },
+  { step: "06", label: "Report" },
+  { step: "07", label: "Fix" },
+];
+
+const REVIEWERS = [
+  { name: "GPT-4o", role: "Security", color: "#10b981" },
+  { name: "Claude", role: "Architecture", color: "#818cf8" },
+  { name: "Gemini", role: "Quality", color: "#fbbf24" },
+];
+
 interface HeroProps {
   task: string;
   setTask: (t: string) => void;
@@ -57,6 +73,111 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
           planning, reviewing, validating, and summarizing every task with
           multi-model intelligence.
         </p>
+      </div>
+
+      {/* ── Pipeline Visualization ── */}
+      <div className="mb-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] px-6 py-5">
+        <p className="text-[10px] font-semibold text-white/30 tracking-widest mb-4 text-center">
+          7-STAGE PIPELINE
+        </p>
+        <div className="flex items-center justify-between gap-1">
+          {PIPELINE_STAGES.map((s, i) => (
+            <div key={s.step} className="flex items-center gap-1 flex-1">
+              <div className="flex flex-col items-center flex-1">
+                <div
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold mb-1.5"
+                  style={{
+                    background:
+                      s.step === "04"
+                        ? "linear-gradient(135deg, #7c3aed 0%, #a855f7 100%)"
+                        : s.step === "07"
+                        ? "rgba(255,255,255,0.06)"
+                        : "rgba(255,255,255,0.04)",
+                    border:
+                      s.step === "04"
+                        ? "1px solid rgba(168,85,247,0.4)"
+                        : "1px solid rgba(255,255,255,0.07)",
+                    color: s.step === "04" ? "#fff" : "rgba(255,255,255,0.4)",
+                  }}
+                >
+                  {s.step}
+                </div>
+                <span
+                  className="text-[10px] font-medium"
+                  style={{
+                    color: s.step === "04" ? "rgba(168,85,247,0.9)" : "rgba(255,255,255,0.3)",
+                  }}
+                >
+                  {s.label}
+                </span>
+              </div>
+              {i < PIPELINE_STAGES.length - 1 && (
+                <div className="w-3 h-px bg-white/[0.08] shrink-0 mb-4" />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Two stat callouts ── */}
+      <div className="grid grid-cols-2 gap-3 mb-8">
+        {/* Multi-model consensus */}
+        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-5 py-4">
+          <p className="text-[10px] font-semibold text-white/30 tracking-widest mb-3">
+            MULTI-MODEL CONSENSUS
+          </p>
+          <div className="flex items-center gap-2 mb-3">
+            {REVIEWERS.map((r) => (
+              <div key={r.name} className="flex-1">
+                <div
+                  className="rounded-lg px-2 py-1.5 text-center mb-1"
+                  style={{
+                    background: `${r.color}12`,
+                    border: `1px solid ${r.color}25`,
+                  }}
+                >
+                  <div className="text-[10px] font-bold" style={{ color: r.color }}>
+                    {r.name}
+                  </div>
+                  <div className="text-[9px] text-white/30 mt-0.5">{r.role}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2 text-center">
+            <p className="text-[11px] font-semibold text-white/70">
+              3 models agree on 3 critical risks
+            </p>
+          </div>
+        </div>
+
+        {/* Confidence score */}
+        <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-5 py-4">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[10px] font-semibold text-white/30 tracking-widest">
+              CONFIDENCE SCORE
+            </p>
+            <span className="text-[9px] text-white/25 tracking-widest font-medium">
+              EXAMPLE
+            </span>
+          </div>
+          <div className="flex items-end justify-center gap-3 mb-3">
+            <div className="text-center">
+              <div className="text-[32px] font-bold text-[#f87171] leading-none">72</div>
+              <div className="text-[9px] text-white/25 mt-1 font-medium">BEFORE</div>
+            </div>
+            <div className="text-white/20 text-lg mb-1 font-light">→</div>
+            <div className="text-center">
+              <div className="text-[32px] font-bold text-[#34d399] leading-none">89</div>
+              <div className="text-[9px] text-white/25 mt-1 font-medium">AFTER FIX</div>
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2 text-center">
+            <p className="text-[11px] font-semibold text-white/70">
+              Auto-fixed in Generate Fixed Version
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Input Card */}

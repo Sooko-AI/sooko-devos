@@ -7,6 +7,7 @@ import type {
   AgreedFinding,
   DisputedFinding,
 } from "@/types";
+import { withTimeout, withRetry, errMsg } from "./async";
 
 // ─── Shared ──────────────────────────────────────────────────────────────────
 
@@ -32,19 +33,6 @@ function shortReviewerName(reviewer: string): string {
   const paren = reviewer.match(/\(([^)]+)\)/);
   if (paren) return paren[1].trim();
   return reviewer.replace(/\s+Reviewer$/i, "").trim();
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms
-    );
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
-    );
-  });
 }
 
 // ─── Jaccard clustering (deterministic fallback) ─────────────────────────────
@@ -188,20 +176,30 @@ Reviewers and their findings:
   return p;
 }
 
-async function clusterFindingsViaJudge(reviews: ModelReview[]): Promise<Cluster[]> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY not configured");
-  }
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+let _anthropic: Anthropic | null = null;
+function anthropicClient(): Anthropic {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not configured");
+  if (!_anthropic) _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return _anthropic;
+}
+
+async function clusterFindingsViaJudge(
+  reviews: ModelReview[],
+  signal?: AbortSignal
+): Promise<Cluster[]> {
   const message = await withTimeout(
-    client.messages.parse({
-      model: JUDGE_MODEL,
-      max_tokens: 4096,
-      messages: [{ role: "user", content: buildJudgePrompt(reviews) }],
-      output_config: { format: zodOutputFormat(JudgeOutputSchema) },
-    }),
+    anthropicClient().messages.parse(
+      {
+        model: JUDGE_MODEL,
+        max_tokens: 4096,
+        messages: [{ role: "user", content: buildJudgePrompt(reviews) }],
+        output_config: { format: zodOutputFormat(JudgeOutputSchema) },
+      },
+      { signal }
+    ),
     JUDGE_TIMEOUT_MS,
-    "Consensus Judge"
+    "Consensus Judge",
+    signal
   );
   if (!message.parsed_output) throw new Error("Judge response missing parsed_output");
   return message.parsed_output.clusters;
@@ -209,22 +207,22 @@ async function clusterFindingsViaJudge(reviews: ModelReview[]): Promise<Cluster[
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-export async function buildConsensus(reviews: ModelReview[]): Promise<ConsensusReport> {
-  const mode = process.env.COPILOT_SDK_MODE || "mock";
+export async function buildConsensus(
+  reviews: ModelReview[],
+  signal?: AbortSignal
+): Promise<ConsensusReport> {
   let clusters: Cluster[];
-
-  if (mode === "live") {
-    try {
-      clusters = await clusterFindingsViaJudge(reviews);
-      console.log(`[Sooko Consensus] LLM judge produced ${clusters.length} clusters`);
-    } catch (err) {
-      console.warn(
-        "[Sooko Consensus] Judge failed, falling back to Jaccard clustering:",
-        err instanceof Error ? err.message : err
-      );
-      clusters = clusterFindingsJaccard(reviews);
-    }
-  } else {
+  try {
+    clusters = await withRetry(
+      () => clusterFindingsViaJudge(reviews, signal),
+      { label: "judge", signal }
+    );
+    console.log(`[Sooko Consensus] LLM judge produced ${clusters.length} clusters`);
+  } catch (err) {
+    console.warn(
+      "[Sooko Consensus] Judge failed, falling back to Jaccard clustering:",
+      errMsg(err)
+    );
     clusters = clusterFindingsJaccard(reviews);
   }
 

@@ -134,10 +134,7 @@ pnpm install
 Copy `.env.example` to `.env.local` and fill in values:
 
 ```env
-# "mock" (default, no keys needed) or "live" (real Copilot SDK + multi-model review)
-COPILOT_SDK_MODE=mock
-
-# Required for live mode
+# All three keys are required — the pipeline fans out across all providers.
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_AI_API_KEY=...
@@ -152,7 +149,7 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-The app runs fully in **mock mode** by default — no API keys required. Set `COPILOT_SDK_MODE=live` with all three BYOK keys to activate the real pipeline. On Node < 22.5 the Copilot SDK tier fails with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite` and the planner falls back to OpenAI direct — reviewers and the judge still run live.
+The pipeline is live-only: plan via Copilot SDK (with OpenAI direct as a fallback), three real model reviews in parallel, and an LLM judge for consensus. On Node < 22.5 the Copilot SDK tier fails with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite` and the planner falls back to OpenAI direct; reviewers and the judge still run normally. Any unrecoverable provider error surfaces in the UI rather than being masked.
 
 ---
 

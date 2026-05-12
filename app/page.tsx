@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import type { Stage, ExecutionPlan, ModelReview, ConsensusReport, AnalysisResult } from "@/types";
+import type { Stage, ExecutionPlan, ModelReview, ConsensusReport, AnalysisResult, Task } from "@/types";
 import type { AnalyzeEvent } from "@/lib/agent";
 import { listHistory, saveHistory, type HistoryEntry } from "@/lib/history";
 
@@ -15,7 +15,6 @@ import { FinalReport } from "@/components/FinalReport";
 import { LoadingState } from "@/components/LoadingState";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 
 export default function Home() {
   const [task, setTask] = useState("");
@@ -29,12 +28,19 @@ export default function Home() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyCount, setHistoryCount] = useState(0);
   const resultsRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const currentTaskMetaRef = useRef<Task | null>(null);
 
-  const isRunning = stage !== "intake" && stage !== "report";
+  const isRunning = stage !== "intake" && stage !== "report" && !error;
 
   // Load history count on mount (hydration-safe).
   useEffect(() => {
     setHistoryCount(listHistory().length);
+  }, []);
+
+  // Cancel any in-flight analysis when the page unmounts (tab close, route change).
+  useEffect(() => {
+    return () => abortRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -44,6 +50,7 @@ export default function Home() {
   }, [stage]);
 
   function restoreFromHistory(entry: HistoryEntry) {
+    abortRef.current?.abort();
     setTask(entry.result.task.prompt);
     setCodeSnippet(entry.result.task.codeSnippet || "");
     setPlan(entry.result.plan);
@@ -59,11 +66,17 @@ export default function Home() {
     if (!t.trim()) return;
     setTask(t);
 
+    // Cancel any prior in-flight run before starting a new one.
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+
     setPlan(null);
     setReviews(null);
     setConsensus(null);
     setResult(null);
     setError(null);
+    currentTaskMetaRef.current = null;
     setStage("planning");
 
     try {
@@ -71,6 +84,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task: t, codeSnippet, repoContext: "" }),
+        signal: ac.signal,
       });
       if (!response.ok || !response.body) {
         throw new Error(`Server responded ${response.status}`);
@@ -79,6 +93,8 @@ export default function Home() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const collected: ModelReview[] = [];
+      let collectedPlan: ExecutionPlan | null = null;
+      let collectedConsensus: ConsensusReport | null = null;
       let buf = "";
 
       readLoop: while (true) {
@@ -95,6 +111,8 @@ export default function Home() {
 
           switch (event.type) {
             case "plan":
+              collectedPlan = event.plan;
+              currentTaskMetaRef.current = event.task;
               setPlan(event.plan);
               setStage("reviewing");
               break;
@@ -104,11 +122,26 @@ export default function Home() {
               if (collected.length === 3) setStage("consensus");
               break;
             case "consensus":
+              collectedConsensus = event.consensus;
               setConsensus(event.consensus);
+              // Save the moment we have a complete triple — protects against
+              // a network drop between consensus and done.
+              if (collectedPlan && currentTaskMetaRef.current) {
+                const partial: AnalysisResult = {
+                  task: currentTaskMetaRef.current,
+                  plan: collectedPlan,
+                  reviews: collected,
+                  consensus: event.consensus,
+                };
+                setResult(partial);
+                saveHistory(partial);
+                setHistoryCount(listHistory().length);
+              }
               break;
             case "done":
               setResult(event.result);
               setStage("report");
+              // saveHistory already called on consensus; refresh count in case it wasn't.
               saveHistory(event.result);
               setHistoryCount(listHistory().length);
               break;
@@ -120,13 +153,19 @@ export default function Home() {
         }
       }
     } catch (err) {
+      // User-initiated cancel — silently exit; UI state was already cleared.
+      if (ac.signal.aborted) return;
       console.error("Analysis failed:", err);
       setError(err instanceof Error ? err.message : "Analysis failed");
-      setStage("intake");
+      // Preserve whatever was already streamed (plan, partial reviews, etc.)
+      // and surface the error inline. The user can hit Reset to start over.
+    } finally {
+      if (abortRef.current === ac) abortRef.current = null;
     }
   }
 
   function reset() {
+    abortRef.current?.abort();
     setTask("");
     setCodeSnippet("");
     setStage("intake");
@@ -177,6 +216,14 @@ export default function Home() {
           <div className="print-hide">
             <Timeline currentStage={stage} />
           </div>
+
+          {/* Inline error banner — preserves whatever streamed before the failure. */}
+          {error && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 mb-6 print-hide">
+              <span className="font-semibold">Analysis failed:</span> {error}
+              <span className="ml-2 opacity-70">Partial results shown below. Hit Reset to start over.</span>
+            </div>
+          )}
 
           {/* Task Banner */}
           <Card className="mb-6 !px-6 !py-4 flex items-start justify-between gap-4 animate-fade-in print-hide">

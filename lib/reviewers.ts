@@ -6,8 +6,9 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import type { ModelReview } from "@/types";
 import { ReviewSchema, type ReviewOutput } from "./schemas";
+import { withTimeout, withRetry, errMsg } from "./async";
 
-const TIMEOUT_MS = 45_000;
+const REVIEW_TIMEOUT_MS = 45_000;
 
 type Provider = "gpt" | "claude" | "gemini";
 
@@ -70,56 +71,71 @@ Return ONLY JSON matching the required schema. No prose, no markdown fences.`;
   return p;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms
-    );
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
-    );
-  });
+// Lazy SDK singletons — keeps the call sites clean and avoids re-instantiating
+// per request. Each only constructs the client when its env key is present.
+let _openai: OpenAI | null = null;
+let _anthropic: Anthropic | null = null;
+let _google: GoogleGenAI | null = null;
+
+function openaiClient(): OpenAI {
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured");
+  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return _openai;
+}
+function anthropicClient(): Anthropic {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not configured");
+  if (!_anthropic) _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return _anthropic;
+}
+function googleClient(): GoogleGenAI {
+  if (!process.env.GOOGLE_AI_API_KEY) throw new Error("GOOGLE_AI_API_KEY not configured");
+  if (!_google) _google = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY });
+  return _google;
 }
 
-async function reviewWithOpenAI(prompt: string): Promise<ReviewOutput> {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+async function reviewWithOpenAI(prompt: string, signal?: AbortSignal): Promise<ReviewOutput> {
   const completion = await withTimeout(
-    client.chat.completions.parse({
-      model: REVIEWER_META.gpt.model,
-      messages: [{ role: "user", content: prompt }],
-      response_format: zodResponseFormat(ReviewSchema, "ModelReview"),
-    }),
-    TIMEOUT_MS,
-    "OpenAI"
+    openaiClient().chat.completions.parse(
+      {
+        model: REVIEWER_META.gpt.model,
+        messages: [{ role: "user", content: prompt }],
+        response_format: zodResponseFormat(ReviewSchema, "ModelReview"),
+      },
+      { signal }
+    ),
+    REVIEW_TIMEOUT_MS,
+    "OpenAI",
+    signal
   );
   const parsed = completion.choices[0]?.message?.parsed;
   if (!parsed) throw new Error("OpenAI response missing parsed output");
   return parsed;
 }
 
-async function reviewWithAnthropic(prompt: string): Promise<ReviewOutput> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+async function reviewWithAnthropic(prompt: string, signal?: AbortSignal): Promise<ReviewOutput> {
   const message = await withTimeout(
-    client.messages.parse({
-      model: REVIEWER_META.claude.model,
-      max_tokens: 2048,
-      messages: [{ role: "user", content: prompt }],
-      output_config: { format: zodOutputFormat(ReviewSchema) },
-    }),
-    TIMEOUT_MS,
-    "Anthropic"
+    anthropicClient().messages.parse(
+      {
+        model: REVIEWER_META.claude.model,
+        max_tokens: 2048,
+        messages: [{ role: "user", content: prompt }],
+        output_config: { format: zodOutputFormat(ReviewSchema) },
+      },
+      { signal }
+    ),
+    REVIEW_TIMEOUT_MS,
+    "Anthropic",
+    signal
   );
   if (!message.parsed_output) throw new Error("Anthropic response missing parsed_output");
   return message.parsed_output;
 }
 
-async function reviewWithGemini(prompt: string): Promise<ReviewOutput> {
-  const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY });
+async function reviewWithGemini(prompt: string, signal?: AbortSignal): Promise<ReviewOutput> {
   const jsonSchema = z.toJSONSchema(ReviewSchema, { target: "draft-07" });
+  // GoogleGenAI doesn't take an AbortSignal directly — withTimeout still races it.
   const response = await withTimeout(
-    ai.models.generateContent({
+    googleClient().models.generateContent({
       model: REVIEWER_META.gemini.model,
       contents: prompt,
       config: {
@@ -127,8 +143,9 @@ async function reviewWithGemini(prompt: string): Promise<ReviewOutput> {
         responseJsonSchema: jsonSchema,
       },
     }),
-    TIMEOUT_MS,
-    "Gemini"
+    REVIEW_TIMEOUT_MS,
+    "Gemini",
+    signal
   );
   const text = response.text;
   if (!text) throw new Error("Empty Gemini response");
@@ -161,11 +178,7 @@ function degradedReview(provider: Provider, reason: string): ModelReview {
   };
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-type RunOne = (prompt: string) => Promise<ReviewOutput>;
+type RunOne = (prompt: string, signal?: AbortSignal) => Promise<ReviewOutput>;
 
 const RUNNERS: Record<Provider, RunOne> = {
   gpt: reviewWithOpenAI,
@@ -176,45 +189,45 @@ const RUNNERS: Record<Provider, RunOne> = {
 /**
  * Streaming multi-model review.
  *
- * Fires all three provider calls in parallel (each with its own specialist
- * prompt) and yields `ModelReview` values as each one settles — slower
- * reviewers don't block faster ones. A provider that throws still yields
- * a degraded `ModelReview` (verdict "Fail", confidence 0), so the stream
- * always produces exactly three results.
+ * Fires all three provider calls in parallel **eagerly** (the moment this
+ * function is called — not when iteration starts) so callers can run other
+ * work alongside review fan-out. Yields `ModelReview` values as each one
+ * settles — slower reviewers don't block faster ones. A provider that
+ * throws still yields a degraded `ModelReview` (verdict "Fail", confidence
+ * 0), so the stream always produces exactly three results. Transient errors
+ * (429/5xx/network) are retried once with jittered backoff before degrading.
  */
-export async function* runMultiModelReviewStream(
+export function runMultiModelReviewStream(
   task: string,
   codeSnippet?: string,
-  repoContext?: string
+  repoContext?: string,
+  signal?: AbortSignal
 ): AsyncGenerator<ModelReview, void, void> {
-  const mode = process.env.COPILOT_SDK_MODE || "mock";
-  if (mode !== "live") {
-    for (const review of runMockMultiModelReview(task, codeSnippet)) {
-      yield review;
-    }
-    return;
-  }
-
   const providers: Provider[] = ["gpt", "claude", "gemini"];
   type Settled = { provider: Provider; review: ModelReview };
   const pending = new Map<Provider, Promise<Settled>>();
 
   for (const provider of providers) {
     const prompt = buildReviewerPrompt(task, codeSnippet, repoContext, SLANTS[provider]);
-    const p = RUNNERS[provider](prompt).then(
-      (output) => ({ provider, review: toModelReview(provider, output) }),
-      (err) => {
-        console.error(`[Sooko Reviewers] ${provider} failed:`, err);
-        return { provider, review: degradedReview(provider, errMsg(err)) };
-      }
-    );
+    const p = withRetry(() => RUNNERS[provider](prompt, signal), { label: provider, signal })
+      .then(
+        (output) => ({ provider, review: toModelReview(provider, output) }),
+        (err) => {
+          console.error(`[Sooko Reviewers] ${provider} failed:`, errMsg(err));
+          return { provider, review: degradedReview(provider, errMsg(err)) };
+        }
+      );
     pending.set(provider, p);
   }
 
-  while (pending.size > 0) {
-    const winner = await Promise.race(pending.values());
-    pending.delete(winner.provider);
-    yield winner.review;
+  return drain();
+
+  async function* drain(): AsyncGenerator<ModelReview, void, void> {
+    while (pending.size > 0) {
+      const winner = await Promise.race(pending.values());
+      pending.delete(winner.provider);
+      yield winner.review;
+    }
   }
 }
 
@@ -225,93 +238,12 @@ export async function* runMultiModelReviewStream(
 export async function runMultiModelReview(
   task: string,
   codeSnippet?: string,
-  repoContext?: string
+  repoContext?: string,
+  signal?: AbortSignal
 ): Promise<ModelReview[]> {
   const reviews: ModelReview[] = [];
-  for await (const r of runMultiModelReviewStream(task, codeSnippet, repoContext)) {
+  for await (const r of runMultiModelReviewStream(task, codeSnippet, repoContext, signal)) {
     reviews.push(r);
   }
   return reviews;
-}
-
-// ─── Mock mode (hackathon demo / offline) ────────────────────────────────────
-
-function runMockMultiModelReview(task: string, codeSnippet?: string): ModelReview[] {
-  void codeSnippet;
-  const t = task.toLowerCase();
-  const isAuth = t.includes("password") || t.includes("reset") || t.includes("auth");
-  const isAPI = t.includes("api") || t.includes("endpoint");
-  const isCheckout = t.includes("checkout") || t.includes("payment");
-
-  return [
-    {
-      ...REVIEWER_META.gpt,
-      verdict: "Needs Improvement",
-      confidence: 72,
-      bugs: [
-        isAuth ? "Reset token not invalidated after successful password change" : "Missing null check on primary entity lookup",
-        isAPI  ? "Response payload leaks internal field names"                  : "Race condition possible on concurrent state mutations",
-      ],
-      security: [
-        isAuth ? "Rate limiting on reset endpoint is insufficient — allows 100 req/min" : "No input sanitization on user-supplied query parameters",
-        "Missing CSRF token validation on state-changing operations",
-        isCheckout ? "Payment amount not re-validated server-side before charge" : "Session fixation vulnerability in auth flow",
-      ],
-      tests: [
-        isAuth ? "No test coverage for expired token redemption path" : "Missing integration test for error response format",
-        "No load test for concurrent access patterns",
-      ],
-      edgeCases: [
-        isAuth     ? "User requests multiple resets within a short window"            : "Empty string vs null handling inconsistent across endpoints",
-        isCheckout ? "Cart modified between checkout initiation and payment capture" : "Unicode input in freeform fields not normalized",
-      ],
-      notes: "The implementation covers the happy path well but lacks defensive coding patterns needed for production. Security posture needs strengthening before deployment.",
-    },
-    {
-      ...REVIEWER_META.claude,
-      verdict: "Conditional Pass",
-      confidence: 78,
-      bugs: [
-        isAuth ? "Password history check absent — user can reuse current password"   : "Error boundaries missing in critical render paths",
-        isAPI  ? "Pagination cursor can be manipulated to access other users' data"  : "Stale closure in event handler causes inconsistent state",
-      ],
-      security: [
-        isAuth ? "Reset token entropy is 32-bit — should be at least 128-bit" : "API keys stored in client-accessible configuration",
-        "No Content-Security-Policy header configured",
-      ],
-      tests: [
-        isAuth ? "Email delivery failure path entirely untested" : "No test for malformed request body handling",
-        "Missing boundary value tests for numeric inputs",
-        "No regression test for the identified race condition",
-      ],
-      edgeCases: [
-        isAuth     ? "Account locked during password reset flow"       : "Request timeout handling during downstream service degradation",
-        isCheckout ? "Applying discount code after price recalculation" : "Concurrent requests from same user session",
-      ],
-      notes: "Architecture is sound and follows reasonable patterns. Primary concerns are around token security and missing test coverage for failure scenarios. Recommend addressing security findings before merge.",
-    },
-    {
-      ...REVIEWER_META.gemini,
-      verdict: "Needs Improvement",
-      confidence: 68,
-      bugs: [
-        isAuth ? "Email verification link does not expire independently of reset token" : "Memory leak in subscription handler — no cleanup on unmount",
-        isAPI  ? "GraphQL query depth not limited — potential DoS vector"               : "Incorrect HTTP status codes returned for validation errors",
-      ],
-      security: [
-        isAuth ? "Rate limiting not enforced at the user-identity level, only IP-based" : "SQL injection possible through unsanitized sort parameter",
-        "Missing audit logging for sensitive operations",
-        isCheckout ? "Order total calculated client-side without server verification" : "CORS configuration overly permissive for production",
-      ],
-      tests: [
-        isAuth ? "No test for concurrent reset attempts from different devices" : "Integration test suite missing database transaction rollback",
-        "Zero coverage on error handling middleware",
-      ],
-      edgeCases: [
-        isAuth ? "User changes email address while reset is in flight" : "Timezone-dependent logic produces incorrect results near midnight UTC",
-        "System behavior undefined when third-party service returns 503",
-      ],
-      notes: "The implementation needs additional hardening. While the core logic is functional, the security surface area is larger than it should be. Testing gaps around concurrency and failure modes are concerning for a production deployment.",
-    },
-  ];
 }

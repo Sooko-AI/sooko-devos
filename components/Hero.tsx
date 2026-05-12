@@ -56,19 +56,19 @@ interface HeroProps {
 
 export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: HeroProps) {
   return (
-    <div className="max-w-[720px] mx-auto px-6 pt-20 pb-16 animate-fade-in">
+    <div className="max-w-[720px] mx-auto px-4 sm:px-6 pt-12 sm:pt-20 pb-12 sm:pb-16 animate-fade-in">
       {/* Header */}
-      <div className="text-center mb-12">
-        <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-accent/[0.08] border border-accent/[0.15] mb-6 text-xs font-semibold text-accent-light tracking-widest">
+      <div className="text-center mb-10 sm:mb-12">
+        <div className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-full bg-accent/[0.08] border border-accent/[0.15] mb-5 sm:mb-6 text-[10px] sm:text-xs font-semibold text-accent-light tracking-widest">
           <span className="w-1.5 h-1.5 rounded-full bg-accent-light" />
           WEB SUMMIT VANCOUVER 2026
         </div>
-        <h1 className="text-[44px] font-bold leading-[1.15] tracking-[-0.035em] mb-4 bg-gradient-to-b from-text-primary to-text-primary/65 bg-clip-text text-transparent">
+        <h1 className="text-[30px] sm:text-[38px] md:text-[44px] font-bold leading-[1.15] tracking-[-0.035em] mb-4 bg-gradient-to-b from-text-primary to-text-primary/65 bg-clip-text text-transparent">
           Build faster with AI.
           <br />
           Verify before you ship.
         </h1>
-        <p className="text-[17px] leading-relaxed text-white/45 max-w-[540px] mx-auto">
+        <p className="text-[14px] sm:text-[16px] md:text-[17px] leading-relaxed text-white/45 max-w-[540px] mx-auto">
           Sooko DevOS adds a trust layer to Copilot-powered software work —
           planning, reviewing, validating, and summarizing every task with
           multi-model intelligence.
@@ -76,12 +76,14 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
       </div>
 
       {/* ── Pipeline Visualization ── */}
-      <div className="mb-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] px-6 py-5">
+      <div className="mb-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 sm:px-6 py-5 relative">
         <p className="text-[10px] font-semibold text-white/30 tracking-widest mb-4 text-center">
           7-STAGE PIPELINE
         </p>
-        <div className="flex items-center justify-between gap-1">
-          {PIPELINE_STAGES.map((s, i) => (
+        {/* On narrow screens the row scrolls horizontally; min-w keeps labels legible. */}
+        <div className="overflow-x-auto -mx-2 px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex items-center justify-between gap-1 min-w-[460px]">
+            {PIPELINE_STAGES.map((s, i) => (
             <div key={s.step} className="flex items-center gap-1 flex-1">
               <div className="flex flex-col items-center flex-1">
                 <div
@@ -103,7 +105,7 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
                   {s.step}
                 </div>
                 <span
-                  className="text-[10px] font-medium"
+                  className="text-[10px] font-medium whitespace-nowrap"
                   style={{
                     color: s.step === "04" ? "rgba(168,85,247,0.9)" : "rgba(255,255,255,0.3)",
                   }}
@@ -116,11 +118,12 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
               )}
             </div>
           ))}
+          </div>
         </div>
       </div>
 
       {/* ── Two stat callouts ── */}
-      <div className="grid grid-cols-2 gap-3 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-8">
         {/* Multi-model consensus */}
         <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-5 py-4">
           <p className="text-[10px] font-semibold text-white/30 tracking-widest mb-3">
@@ -182,7 +185,7 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
 
       {/* Input Card */}
       <Card glow className="!p-0 overflow-hidden">
-        <div className="px-7 pt-6">
+        <div className="px-5 sm:px-7 pt-5 sm:pt-6">
           <label className="text-[13px] font-semibold text-white/50 tracking-wide block mb-2.5">
             DESCRIBE YOUR TASK
           </label>
@@ -195,7 +198,7 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
           />
         </div>
 
-        <div className="px-7 py-4 border-t border-white/[0.04]">
+        <div className="px-5 sm:px-7 py-4 border-t border-white/[0.04]">
           <label className="text-xs font-semibold text-white/35 tracking-wide block mb-2">
             CODE SNIPPET (OPTIONAL)
           </label>
@@ -208,14 +211,14 @@ export function Hero({ task, setTask, codeSnippet, setCodeSnippet, onRun }: Hero
           />
         </div>
 
-        <div className="px-7 py-4 border-t border-white/[0.04] flex items-center justify-between">
+        <div className="px-5 sm:px-7 py-4 border-t border-white/[0.04] flex flex-wrap items-center justify-between gap-3">
           <Badge className="text-white/35">
             <span className="mr-1">⎔</span> No repo connected
           </Badge>
           <button
             onClick={() => onRun()}
             disabled={!task.trim()}
-            className={`px-6 py-2.5 rounded-xl border-none text-sm font-semibold transition-all tracking-tight ${
+            className={`w-full sm:w-auto px-6 py-2.5 rounded-xl border-none text-sm font-semibold transition-all tracking-tight ${
               task.trim()
                 ? "bg-gradient-to-br from-accent to-purple-600 text-white cursor-pointer hover:opacity-90"
                 : "bg-white/[0.06] text-white/25 cursor-default"
